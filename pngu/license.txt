@@ -1,0 +1,4 @@
+PNGU is an open source project developed by frontier. It is published freely and with no warranty. You are allowed to use it for non-profit or commecial purposes under your responsability. If you use PNGU it would be nice to see a mention in your project credits.
+
+
+June 10, 2008.

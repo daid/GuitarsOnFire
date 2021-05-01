@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>GuitarsOnFire</name>
+  <coder>Daid</coder>
+  <version>1.0</version>
+  <release_date>-</release_date>
+  <short_description>Guitar Hero Clone</short_description>
+  <long_description>This is a Guitar Hero clone made specialy for the Wii. Make use of FretsOnFire compattible songs.</long_description>
+</app>

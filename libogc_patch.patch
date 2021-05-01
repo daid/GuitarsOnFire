@@ -1,0 +1,469 @@
+Index: gc/wiiuse/wiiuse.h
+===================================================================
+--- gc/wiiuse/wiiuse.h	(revision 3693)
++++ gc/wiiuse/wiiuse.h	(working copy)
+@@ -79,7 +79,26 @@
+ #define GUITAR_HERO_3_BUTTON_STRUM_DOWN	0x4000
+ #define GUITAR_HERO_3_BUTTON_ALL		0xFEFF
+ 
++/* guitar hero world tour touch bar codes */
++#define GUITAR_HERO_3_TOUCH_AVAILABLE	0x1000
++#define GUITAR_HERO_3_TOUCH_GREEN		0x1001
++#define GUITAR_HERO_3_TOUCH_RED			0x1002
++#define GUITAR_HERO_3_TOUCH_YELLOW		0x1004
++#define GUITAR_HERO_3_TOUCH_BLUE		0x1008
++#define GUITAR_HERO_3_TOUCH_ORANGE		0x1010
+ 
++/* guitar hero drums button codes */
++#define GUITAR_HERO_DRUM_BASS			0x0004
++#define GUITAR_HERO_DRUM_PAD_BLUE		0x0008
++#define GUITAR_HERO_DRUM_PAD_GREEN		0x0010
++#define GUITAR_HERO_DRUM_CYMBAL_YELLOW	0x0020
++#define GUITAR_HERO_DRUM_PAD_RED		0x0040
++#define GUITAR_HERO_DRUM_CYMBAL_ORANGE	0x0080
++#define GUITAR_HERO_DRUM_PLUS			0x0400
++#define GUITAR_HERO_DRUM_MINUS			0x1000
++#define GUITAR_HERO_DRUM_ALL			0x14FC
++
++
+ /* wiimote option flags */
+ #define WIIUSE_SMOOTHING				0x01
+ #define WIIUSE_CONTINUOUS				0x02
+@@ -96,6 +115,7 @@
+ #define EXP_CLASSIC						2
+ #define EXP_GUITAR_HERO_3				3
+ #define EXP_WII_BOARD					4
++#define EXP_GUITAR_HERO_DRUMS			5
+ 
+ /* IR correction types */
+ typedef enum ir_position_t {
+@@ -478,10 +498,26 @@
+ 	ubyte wb_raw;
+ 	float whammy_bar;				/**< whammy bar (range 0-1)					*/
+ 
++	ubyte tb_raw;
++	int touch_bar;					/**< touch bar								*/
++
+ 	struct joystick_t js;			/**< joystick calibration					*/
+ } guitar_hero_3_t;
+ 
+ /**
++ *	@struct guitar_hero_drums_t
++ *	@brief Guitar Hero Drums expansion device.
++ */
++typedef struct guitar_hero_drums_t {
++	short btns;						/**< what buttons have just been pressed	*/
++	short btns_last;				/**< what buttons have just been pressed	*/
++	short btns_held;				/**< what buttons are being held down		*/
++	short btns_released;			/**< what buttons were just released this	*/
++
++	struct joystick_t js;			/**< joystick calibration					*/
++} guitar_hero_drums_t;
++
++/**
+   * @struct wii_board_t
+   * @brief Wii Balance Board expansion device.
+   */
+@@ -513,6 +549,7 @@
+ 		struct nunchuk_t nunchuk;
+ 		struct classic_ctrl_t classic;
+ 		struct guitar_hero_3_t gh3;
++		struct guitar_hero_drums_t ghdrums;
+  		struct wii_board_t wb;
+ 	};
+ } expansion_t;
+@@ -561,6 +598,8 @@
+ 	WIIUSE_CLASSIC_CTRL_REMOVED,
+ 	WIIUSE_GUITAR_HERO_3_CTRL_INSERTED,
+  	WIIUSE_GUITAR_HERO_3_CTRL_REMOVED,
++	WIIUSE_GUITAR_HERO_DRUMS_CTRL_INSERTED,
++ 	WIIUSE_GUITAR_HERO_DRUMS_CTRL_REMOVED,
+  	WIIUSE_WII_BOARD_INSERTED,
+  	WIIUSE_WII_BOARD_REMOVED
+ } WIIUSE_EVENT_TYPE;
+Index: wiiuse/events.c
+===================================================================
+--- wiiuse/events.c	(revision 3693)
++++ wiiuse/events.c	(working copy)
+@@ -171,6 +171,9 @@
+ 		case EXP_GUITAR_HERO_3:
+ 			guitar_hero_3_event(&wm->exp.gh3, msg);
+ 			break;
++		case EXP_GUITAR_HERO_DRUMS:
++			guitar_hero_drums_event(&wm->exp.ghdrums, msg);
++			break;
+  		case EXP_WII_BOARD:
+  			wii_board_event(&wm->exp.wb, msg);
+  			break;
+Index: wiiuse/guitar_hero_3.c
+===================================================================
+--- wiiuse/guitar_hero_3.c	(revision 3693)
++++ wiiuse/guitar_hero_3.c	(working copy)
+@@ -59,9 +59,6 @@
+  *	@return	Returns 1 if handshake was successful, 0 if not.
+  */
+ int guitar_hero_3_handshake(struct wiimote_t* wm, struct guitar_hero_3_t* gh3, ubyte* data, uword len) {
+-	//int i;
+-	int offset = 0;
+-
+ 	/*
+ 	 *	The good fellows that made the Guitar Hero 3 controller
+ 	 *	failed to factory calibrate the devices.  There is no
+@@ -71,33 +68,11 @@
+ 	gh3->btns = 0;
+ 	gh3->btns_held = 0;
+ 	gh3->btns_released = 0;
++	gh3->wb_raw = 0;
+ 	gh3->whammy_bar = 0.0f;
++	gh3->tb_raw = 0;
++	gh3->touch_bar = -1;
+ 
+-	/* decrypt data */
+-	/*
+-	for (i = 0; i < len; ++i)
+-		data[i] = (data[i] ^ 0x17) + 0x17;
+-	*/
+-	if (data[offset] == 0xFF) {
+-		/*
+-		 *	Sometimes the data returned here is not correct.
+-		 *	This might happen because the wiimote is lagging
+-		 *	behind our initialization sequence.
+-		 *	To fix this just request the handshake again.
+-		 *
+-		 *	Other times it's just the first 16 bytes are 0xFF,
+-		 *	but since the next 16 bytes are the same, just use
+-		 *	those.
+-		 */
+-		if (data[offset + 16] == 0xFF) {
+-			/* get the calibration data */
+-			WIIUSE_DEBUG("Guitar Hero 3 handshake appears invalid, trying again.");
+-			wiiuse_read_data(wm, data, WM_EXP_MEM_CALIBR, EXP_HANDSHAKE_LEN, wiiuse_handshake_expansion);
+-			return 0;
+-		} else
+-			offset += 16;
+-	}
+-
+ 	/* joystick stuff */
+ 	gh3->js.max.x = GUITAR_HERO_3_JS_MAX_X;
+ 	gh3->js.min.x = GUITAR_HERO_3_JS_MIN_X;
+@@ -146,10 +121,34 @@
+ 	*/
+ 	guitar_hero_3_pressed_buttons(gh3, BIG_ENDIAN_SHORT(*(short*)(msg + 4)));
+ 
+-	gh3->js.pos.x = msg[0];
+-	gh3->js.pos.y = msg[1];
+-	gh3->wb_raw = msg[3];
+-#ifndef GEKKO
++	gh3->js.pos.x = (msg[0] & GUITAR_HERO_3_JS_MASK);
++	gh3->js.pos.y = (msg[1] & GUITAR_HERO_3_JS_MASK);
++	gh3->tb_raw = (msg[2] & GUITAR_HERO_3_TOUCH_MASK);
++	gh3->wb_raw = (msg[3] & GUITAR_HERO_3_WHAMMY_MASK);
++#ifndef GEKKO	/* Done in wpad.c for GEKKO */
++	/* touch bar */
++	gh3->touch_bar = 0;
++	if (gh3->tb_raw > 0x1B)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_ORANGE;
++	else if (gh3->tb_raw > 0x18)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_ORANGE | GUITAR_HERO_3_TOUCH_BLUE;
++	else if (gh3->tb_raw > 0x15)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_BLUE;
++	else if (gh3->tb_raw > 0x13)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_BLUE | GUITAR_HERO_3_TOUCH_YELLOW;
++	else if (gh3->tb_raw > 0x10)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_YELLOW;
++	else if (gh3->tb_raw > 0x0D)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_AVAILABLE;
++	else if (gh3->tb_raw > 0x0B)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_YELLOW | GUITAR_HERO_3_TOUCH_RED;
++	else if (gh3->tb_raw > 0x08)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_RED;
++	else if (gh3->tb_raw > 0x05)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_RED | GUITAR_HERO_3_TOUCH_GREEN;
++	else if (gh3->tb_raw > 0x02)
++		gh3->touch_bar = GUITAR_HERO_3_TOUCH_GREEN;
++	
+ 	/* whammy bar */
+ 	gh3->whammy_bar = (gh3->wb_raw - GUITAR_HERO_3_WHAMMY_BAR_MIN) / (float)(GUITAR_HERO_3_WHAMMY_BAR_MAX - GUITAR_HERO_3_WHAMMY_BAR_MIN);
+ 
+@@ -181,3 +180,105 @@
+ 	/* buttons pressed now */
+ 	gh3->btns = now;
+ }
++
++static void guitar_hero_drums_pressed_buttons(struct guitar_hero_drums_t* ghdrums, short now);
++
++/**
++ *	@brief Handle the handshake data from the guitar.
++ *
++ *	@param cc		A pointer to a classic_ctrl_t structure.
++ *	@param data		The data read in from the device.
++ *	@param len		The length of the data block, in bytes.
++ *
++ *	@return	Returns 1 if handshake was successful, 0 if not.
++ */
++int guitar_hero_drums_handshake(struct wiimote_t* wm, struct guitar_hero_drums_t* ghdrums, ubyte* data, uword len) {
++	/*
++	 *	The good fellows that made the Guitar Hero 3 controller
++	 *	failed to factory calibrate the devices.  There is no
++	 *	calibration data on the device.
++	 */
++
++	ghdrums->btns = 0;
++	ghdrums->btns_held = 0;
++	ghdrums->btns_released = 0;
++
++	/* joystick stuff */
++	ghdrums->js.max.x = GUITAR_HERO_3_JS_MAX_X;
++	ghdrums->js.min.x = GUITAR_HERO_3_JS_MIN_X;
++	ghdrums->js.center.x = GUITAR_HERO_3_JS_CENTER_X;
++	ghdrums->js.max.y = GUITAR_HERO_3_JS_MAX_Y;
++	ghdrums->js.min.y = GUITAR_HERO_3_JS_MIN_Y;
++	ghdrums->js.center.y = GUITAR_HERO_3_JS_CENTER_Y;
++
++	/* handshake done */
++	wm->event = WIIUSE_GUITAR_HERO_DRUMS_CTRL_INSERTED;
++	wm->exp.type = EXP_GUITAR_HERO_DRUMS;
++
++	#ifdef WIN32
++	wm->timeout = WIIMOTE_DEFAULT_TIMEOUT;
++	#endif
++
++	return 1;
++}
++
++
++/**
++ *	@brief The guitar disconnected.
++ *
++ *	@param cc		A pointer to a classic_ctrl_t structure.
++ */
++void guitar_hero_drums_disconnected(struct guitar_hero_drums_t* ghdrums) 
++{
++	memset(ghdrums, 0, sizeof(struct guitar_hero_drums_t));
++}
++
++
++
++/**
++ *	@brief Handle guitar event.
++ *
++ *	@param cc		A pointer to a classic_ctrl_t structure.
++ *	@param msg		The message specified in the event packet.
++ */
++void guitar_hero_drums_event(struct guitar_hero_drums_t* ghdrums, ubyte* msg) {
++	//int i;
++
++	/* decrypt data */
++	/*
++	for (i = 0; i < 6; ++i)
++		msg[i] = (msg[i] ^ 0x17) + 0x17;
++	*/
++	guitar_hero_drums_pressed_buttons(ghdrums, BIG_ENDIAN_SHORT(*(short*)(msg + 4)));
++
++	ghdrums->js.pos.x = (msg[0] & GUITAR_HERO_3_JS_MASK);
++	ghdrums->js.pos.y = (msg[1] & GUITAR_HERO_3_JS_MASK);
++#ifndef GEKKO	/* Done in wpad.c for GEKKO */
++	/* joy stick */
++	calc_joystick_state(&ghdrums->js, ghdrums->js.pos.x, ghdrums->js.pos.y);
++#endif
++}
++
++
++/**
++ *	@brief Find what buttons are pressed.
++ *
++ *	@param cc		A pointer to a classic_ctrl_t structure.
++ *	@param msg		The message byte specified in the event packet.
++ */
++static void guitar_hero_drums_pressed_buttons(struct guitar_hero_drums_t* ghdrums, short now) {
++	/* message is inverted (0 is active, 1 is inactive) */
++	now = ~now & GUITAR_HERO_DRUM_ALL;
++
++	/* preserve old btns pressed */
++	ghdrums->btns_last = ghdrums->btns;
++
++	/* pressed now & were pressed, then held */
++	ghdrums->btns_held = (now & ghdrums->btns);
++
++	/* were pressed or were held & not pressed now, then released */
++	ghdrums->btns_released = ((ghdrums->btns | ghdrums->btns_held) & ~now);
++
++	/* buttons pressed now */
++	ghdrums->btns = now;
++}
+Index: wiiuse/guitar_hero_3.h
+===================================================================
+--- wiiuse/guitar_hero_3.h	(revision 3693)
++++ wiiuse/guitar_hero_3.h	(working copy)
+@@ -36,15 +36,19 @@
+ 
+ #include "wiiuse_internal.h"
+ 
+-#define GUITAR_HERO_3_JS_MIN_X				0xC5
+-#define GUITAR_HERO_3_JS_MAX_X				0xFC
+-#define GUITAR_HERO_3_JS_CENTER_X			0xE0
+-#define GUITAR_HERO_3_JS_MIN_Y				0xC5
+-#define GUITAR_HERO_3_JS_MAX_Y				0xFA
+-#define GUITAR_HERO_3_JS_CENTER_Y			0xE0
+-#define GUITAR_HERO_3_WHAMMY_BAR_MIN		0xEF
+-#define GUITAR_HERO_3_WHAMMY_BAR_MAX		0xFA
++#define GUITAR_HERO_3_JS_MASK				0x3F
++#define GUITAR_HERO_3_TOUCH_MASK			0x1F
++#define GUITAR_HERO_3_WHAMMY_MASK			0x1F
+ 
++#define GUITAR_HERO_3_JS_MIN_X				0x05
++#define GUITAR_HERO_3_JS_MAX_X				0x3C
++#define GUITAR_HERO_3_JS_CENTER_X			0x20
++#define GUITAR_HERO_3_JS_MIN_Y				0x05
++#define GUITAR_HERO_3_JS_MAX_Y				0x3A
++#define GUITAR_HERO_3_JS_CENTER_Y			0x20
++#define GUITAR_HERO_3_WHAMMY_BAR_MIN		0x0F
++#define GUITAR_HERO_3_WHAMMY_BAR_MAX		0x1A
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -55,6 +59,12 @@
+ 
+ void guitar_hero_3_event(struct guitar_hero_3_t* gh3, ubyte* msg);
+ 
++int guitar_hero_drums_handshake(struct wiimote_t* wm, struct guitar_hero_drums_t* ghdrums, ubyte* data, uword len);
++
++void guitar_hero_drums_disconnected(struct guitar_hero_drums_t* ghdrums);
++
++void guitar_hero_drums_event(struct guitar_hero_drums_t* ghdrums, ubyte* msg);
++
+ #ifdef __cplusplus
+ }
+ #endif
+Index: wiiuse/io.c
+===================================================================
+--- wiiuse/io.c	(revision 3693)
++++ wiiuse/io.c	(working copy)
+@@ -63,6 +63,7 @@
+ void wiiuse_handshake_expansion(struct wiimote_t *wm,ubyte *data,uword len)
+ {
+ 	int id;
++	int id_ext;
+ 	ubyte val;
+ 	ubyte *buf = NULL;
+ 
+@@ -94,7 +95,22 @@
+ 					if(!classic_ctrl_handshake(wm,&wm->exp.classic,data,len)) return;
+ 					break;
+ 				case EXP_ID_CODE_GUITAR:
+-					if(!guitar_hero_3_handshake(wm,&wm->exp.gh3,data,len)) return;
++					id_ext = BIG_ENDIAN_SHORT(*(short*)(&data[218]));
++					switch(id_ext)
++					{
++					case EXP_ID_CODE_GUITAR_EXT_GUITAR:
++						if(!guitar_hero_3_handshake(wm,&wm->exp.gh3,data,len)) return;
++						break;
++					case EXP_ID_CODE_GUITAR_EXT_DRUMS:
++						if(!guitar_hero_drums_handshake(wm,&wm->exp.ghdrums,data,len)) return;
++						break;
++					default:
++						WIIMOTE_DISABLE_STATE(wm,WIIMOTE_STATE_EXP_HANDSHAKE);
++						WIIMOTE_ENABLE_STATE(wm,WIIMOTE_STATE_EXP_FAILED);
++						__lwp_wkspace_free(data);
++						wiiuse_status(wm,NULL);
++						return;
++					}
+ 					break;
+  				case EXP_ID_CODE_WIIBOARD:
+  					if(!wii_board_handshake(wm,&wm->exp.wb,data,len)) return;
+@@ -134,6 +150,10 @@
+ 			guitar_hero_3_disconnected(&wm->exp.gh3);
+ 			wm->event = WIIUSE_GUITAR_HERO_3_CTRL_REMOVED;
+ 			break;
++		case EXP_GUITAR_HERO_DRUMS:
++			guitar_hero_drums_disconnected(&wm->exp.ghdrums);
++			wm->event = WIIUSE_GUITAR_HERO_DRUMS_CTRL_REMOVED;
++			break;
+  		case EXP_WII_BOARD:
+  			wii_board_disconnected(&wm->exp.wb);
+  			wm->event = WIIUSE_WII_BOARD_REMOVED;
+Index: wiiuse/wiiuse_internal.h
+===================================================================
+--- wiiuse/wiiuse_internal.h	(revision 3693)
++++ wiiuse/wiiuse_internal.h	(working copy)
+@@ -165,6 +165,9 @@
+ #define EXP_ID_CODE_GUITAR					0xa4200103
+ #define EXP_ID_CODE_WIIBOARD				0xa4200402
+ 
++#define EXP_ID_CODE_GUITAR_EXT_GUITAR		0x0000
++#define EXP_ID_CODE_GUITAR_EXT_DRUMS		0x0100
++
+ #define EXP_HANDSHAKE_LEN					224
+ 
+ /********************
+Index: wiiuse/wpad.c
+===================================================================
+--- wiiuse/wpad.c	(revision 3693)
++++ wiiuse/wpad.c	(working copy)
+@@ -364,12 +364,43 @@
+ 			{
+ 				struct guitar_hero_3_t *gh3 = &data->exp.gh3;
+ 
++				gh3->touch_bar = 0;
++				if (gh3->tb_raw > 0x1B)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_ORANGE;
++				else if (gh3->tb_raw > 0x18)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_ORANGE | GUITAR_HERO_3_TOUCH_BLUE;
++				else if (gh3->tb_raw > 0x15)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_BLUE;
++				else if (gh3->tb_raw > 0x13)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_BLUE | GUITAR_HERO_3_TOUCH_YELLOW;
++				else if (gh3->tb_raw > 0x10)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_YELLOW;
++				else if (gh3->tb_raw > 0x0D)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_AVAILABLE;
++				else if (gh3->tb_raw > 0x0B)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_YELLOW | GUITAR_HERO_3_TOUCH_RED;
++				else if (gh3->tb_raw > 0x08)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_RED;
++				else if (gh3->tb_raw > 0x05)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_RED | GUITAR_HERO_3_TOUCH_GREEN;
++				else if (gh3->tb_raw > 0x02)
++					gh3->touch_bar = GUITAR_HERO_3_TOUCH_GREEN;
++
+ 				gh3->whammy_bar = (gh3->wb_raw - GUITAR_HERO_3_WHAMMY_BAR_MIN) / (float)(GUITAR_HERO_3_WHAMMY_BAR_MAX - GUITAR_HERO_3_WHAMMY_BAR_MIN);
+ 				calc_joystick_state(&gh3->js, gh3->js.pos.x, gh3->js.pos.y);
+ 				data->btns_h |= (data->exp.gh3.btns<<16);
+ 			}
+ 			break;
+ 
++			case EXP_GUITAR_HERO_DRUMS:
++			{
++				struct guitar_hero_drums_t *ghdrums = &data->exp.ghdrums;
++
++				calc_joystick_state(&ghdrums->js, ghdrums->js.pos.x, ghdrums->js.pos.y);
++				data->btns_h |= (data->exp.ghdrums.btns<<16);
++			}
++			break;
++
+  			case EXP_WII_BOARD:
+  			{
+ 				struct wii_board_t *wb = &data->exp.wb;
+@@ -405,6 +436,9 @@
+ 		case EXP_GUITAR_HERO_3:
+ 			wm->lstate.exp.gh3 = wm->exp.gh3;
+ 			break;
++		case EXP_GUITAR_HERO_DRUMS:
++			wm->lstate.exp.ghdrums = wm->exp.ghdrums;
++			break;
+ 		case EXP_WII_BOARD:
+ 			wm->lstate.exp.wb = wm->exp.wb;
+ 			break;
+@@ -450,6 +484,11 @@
+ 			STATE_CHECK(thresh->js, wm->exp.gh3.wb_raw, wm->lstate.exp.gh3.wb_raw);
+ 			STATE_CHECK(thresh->js, wm->exp.gh3.js.pos.x, wm->lstate.exp.gh3.js.pos.x);
+ 			STATE_CHECK(thresh->js, wm->exp.gh3.js.pos.y, wm->lstate.exp.gh3.js.pos.y);
++		case EXP_GUITAR_HERO_DRUMS:
++			data->exp.ghdrums = wm->exp.ghdrums;
++			STATE_CHECK_SIMPLE(thresh->btns, wm->exp.ghdrums.btns, wm->lstate.exp.ghdrums.btns);
++			STATE_CHECK(thresh->js, wm->exp.ghdrums.js.pos.x, wm->lstate.exp.ghdrums.js.pos.x);
++			STATE_CHECK(thresh->js, wm->exp.ghdrums.js.pos.y, wm->lstate.exp.ghdrums.js.pos.y);
+ 			break;
+  		case EXP_WII_BOARD:
+ 			data->exp.wb = wm->exp.wb;
